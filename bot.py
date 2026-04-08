@@ -161,9 +161,10 @@ def index():
     return jsonify({'status': 'Sakhva Travel WhatsApp Bot'})
 
 
+# Запускаем polling при импорте модуля (работает и с gunicorn, и напрямую)
+_t = threading.Thread(target=poll_messages, daemon=True)
+_t.start()
+print('Polling started!')
+
 if __name__ == '__main__':
-    # Запускаем polling в отдельном потоке
-    t = threading.Thread(target=poll_messages, daemon=True)
-    t.start()
-    print('Bot started!')
     app.run(host='0.0.0.0', port=5000)
