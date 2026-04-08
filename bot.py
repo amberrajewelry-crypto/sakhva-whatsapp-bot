@@ -134,7 +134,20 @@ def send_message(phone: str, text: str):
     except Exception as e:
         print(f'Send error: {e}')
 
+# Фразы с кнопок сайта — активируют бота
+SITE_TRIGGERS = [
+    'хочу узнать про туры',
+    'хочу забронировать тур',
+    'привет тимур',
+    'хочу узнать про тур',
+]
+
+def is_site_trigger(text: str) -> bool:
+    t = text.lower()
+    return any(trigger in t for trigger in SITE_TRIGGERS)
+
 processed_ids = set()
+active_users  = set()   # номера, активировавшие бота через сайт
 stats = {'received': 0, 'replied': 0, 'forwarded': 0, 'started_at': None}
 
 def poll_messages():
@@ -152,6 +165,10 @@ def poll_messages():
             body = data.get('body', {})
             type_ = body.get('typeWebhook', '')
 
+            # Удаляем из очереди СРАЗУ — до обработки, чтобы не было дублей при редеплое
+            if receipt_id:
+                requests.delete(f'{BASE_URL}/deleteNotification/{TOKEN}/{receipt_id}', timeout=5)
+
             if type_ == 'incomingMessageReceived':
                 msg_data = body.get('messageData', {})
                 text = (msg_data.get('textMessageData', {}).get('textMessage', '') or
@@ -165,19 +182,23 @@ def poll_messages():
                     stats['received'] += 1
                     print(f'[{name}] {text}')
 
-                    # AI-ответ
-                    reply = get_ai_reply(phone, text)
-                    time.sleep(1.5)
-                    send_message(phone, reply)
-                    stats['replied'] += 1
-                    print(f'→ AI ответил: {reply[:60]}...')
+                    # Только если диалог уже активен или это первое сообщение с сайта
+                    active = phone in active_users
+                    trigger = is_site_trigger(text)
 
-                    # Уведомить Тимура
+                    if active or trigger:
+                        if trigger and not active:
+                            active_users.add(phone)
+                        # AI-ответ
+                        reply = get_ai_reply(phone, text)
+                        time.sleep(1.5)
+                        send_message(phone, reply)
+                        stats['replied'] += 1
+                        print(f'→ AI ответил: {reply[:60]}...')
+
+                    # Тимуру — всегда
                     send_message(GUIDE_PHONE, f'📩 *{name}* (+{phone}):\n{text}')
                     stats['forwarded'] += 1
-
-            if receipt_id:
-                requests.delete(f'{BASE_URL}/deleteNotification/{TOKEN}/{receipt_id}', timeout=5)
 
         except Exception as e:
             print(f'Poll error: {e}')
