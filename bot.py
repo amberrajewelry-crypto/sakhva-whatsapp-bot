@@ -1,168 +1,169 @@
 """
-Sakhva Travel — WhatsApp бот
-GREEN-API + Flask webhook
-
-Функции:
-1. Автоответ на входящие сообщения
-2. Отправка подтверждения бронирования
-3. Напоминание за день до тура
+Sakhva Travel — WhatsApp бот (polling mode)
+GREEN-API getNotification — работает на бесплатном тарифе
 """
-
 import requests
-import json
-from datetime import datetime, timedelta
+import time
+import threading
 from flask import Flask, request, jsonify
 
-# ── CONFIG ──
 INSTANCE = '7107579885'
 TOKEN    = '813d22a2e8d94f9fb830ad1edbfd44d6537234adb0dc4f35a9'
 BASE_URL = f'https://api.green-api.com/waInstance{INSTANCE}'
-GUIDE_PHONE = '995511272623'  # номер Тимура для уведомлений
+GUIDE_PHONE = '995511272623'
 
 app = Flask(__name__)
 
-# ── ОТПРАВКА СООБЩЕНИЯ ──
 def send_message(phone: str, text: str):
-    """phone = '79991234567' или '995511272623' (без +)"""
-    chat_id = f'{phone}@c.us'
-    r = requests.post(
-        f'{BASE_URL}/sendMessage/{TOKEN}',
-        json={'chatId': chat_id, 'message': text}
-    )
-    return r.json()
+    try:
+        r = requests.post(
+            f'{BASE_URL}/sendMessage/{TOKEN}',
+            json={'chatId': f'{phone}@c.us', 'message': text},
+            timeout=10
+        )
+        return r.json()
+    except Exception as e:
+        print(f'Send error: {e}')
 
-# ── АВТООТВЕТЫ ──
 KEYWORDS = {
-    ('цена', 'стоит', 'сколько', 'price', 'cost'): """💰 *Цены на туры 2026:*
+    ('цена','стоит','сколько','price','cost','€','eur'): """💰 *Цены на туры 2026:*
 
 • Казбеги за 1 день — от €45/чел
-• Частный тур по Тбилиси — от €35/чел
+• Тбилиси скрытые места — от €35/чел
 • Кахетия / Сигнаги — от €50/чел
 • Мцхета — от €35/чел
 
-Цена включает: транспорт, гид, все входы.
 Оплата в день тура — наличными или картой.
+Напишите дату и количество человек 📅""",
 
-Хотите забронировать? Напишите удобную дату 📅""",
+    ('казбег','kazbeg'): """🏔 *Тур в Казбеги*
 
-    ('казбег', 'kazbeg', 'гора', 'гдзе', 'гори'): """🏔 *Тур в Казбеги*
+Выезд из Тбилиси 08:00, возврат ~20:00
+Маршрут: ВГД → Степанцминда → Гергети (2170м)
 
-Выезд из Тбилиси в 08:00, возврат ~20:00.
-Маршрут: Военно-Грузинская дорога → Степанцминда → Церковь Гергети (2170м)
-
-От €45/чел | Макс. 6 человек
+От €45/чел · до 6 человек
 Бесплатный перенос при плохой погоде ☁️
 
-Укажите дату и количество человек — подтвержу свободные места!""",
+Укажите дату и кол-во человек!""",
 
-    ('свобод', 'есть места', 'доступен', 'available', 'free'): """📅 Напишите удобную дату и количество человек — проверю наличие мест и отвечу за 15 минут!
-
-Работаю ежедневно 08:00–22:00 🕗""",
-
-    ('привет', 'здравствуй', 'добрый', 'hello', 'hi', 'хай'): """👋 Привет! Я Тимур — частный русскоязычный гид по Грузии.
+    ('привет','здравствуй','добрый','hello','hi','салам','хай','good'): """👋 Привет! Я Тимур — частный гид по Грузии 🇬🇪
 
 Туры 2026:
-🏔 Казбеги за 1 день — €45+
-🏛 Тбилиси скрытые места — €35+
-🍷 Кахетия и вино — €50+
+🏔 Казбеги — €45+
+🏛 Тбилиси — €35+
+🍷 Кахетия — €50+
 🕌 Мцхета — €35+
 
 Что вас интересует?""",
 
-    ('отмен', 'cancel', 'перенес', 'reschedule'): """✅ *Политика отмены:*
+    ('отмен','cancel','перенес','reschedule'): """✅ *Политика отмены:*
 
-Бесплатная отмена за 24 часа — без вопросов и штрафов.
+Бесплатная отмена за 24 часа — без штрафов.
+Казбеги: бесплатный перенос при плохой погоде.
+Переносов неограниченно. Предоплаты нет.
 
-Для Казбеги: если плохая погода — Тимур сам предложит перенос бесплатно.
-Количество переносов не ограничено.
+Напишите дату — оформим! 📅""",
 
-Напишите вашу дату — оформим перенос! 📅""",
+    ('свобод','есть места','available','когда','дата'): """📅 Напишите удобную дату и количество человек — проверю наличие мест и отвечу за 15 минут!
+
+Работаю ежедневно 08:00–22:00 🕗""",
+
+    ('спасибо','thanks','thank'): """Пожалуйста! 😊 Буду рад встретить вас в Грузии 🇬🇪
+
+По любым вопросам — пишите!""",
 }
 
+processed_ids = set()
+
 def get_auto_reply(text: str):
-    text_lower = text.lower()
-    for keywords, reply in KEYWORDS.items():
-        if any(kw in text_lower for kw in keywords):
+    t = text.lower()
+    for kws, reply in KEYWORDS.items():
+        if any(kw in t for kw in kws):
             return reply
     return None
 
-# ── WEBHOOK — входящие сообщения ──
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.json
-    if not data:
-        return jsonify({'ok': True})
+def poll_messages():
+    print('Polling started...')
+    while True:
+        try:
+            r = requests.get(f'{BASE_URL}/receiveNotification/{TOKEN}', timeout=15)
+            data = r.json()
+            if not data:
+                time.sleep(1)
+                continue
 
-    type_ = data.get('typeWebhook')
+            receipt_id = data.get('receiptId')
+            body = data.get('body', {})
+            type_ = body.get('typeWebhook', '')
 
-    # Входящее сообщение
-    if type_ == 'incomingMessageReceived':
-        msg = data.get('messageData', {})
-        text = msg.get('textMessageData', {}).get('textMessage', '')
-        sender = data.get('senderData', {}).get('sender', '')
-        sender_name = data.get('senderData', {}).get('senderName', 'Гость')
-        phone = sender.replace('@c.us', '')
+            if type_ == 'incomingMessageReceived':
+                msg_data = body.get('messageData', {})
+                text = msg_data.get('textMessageData', {}).get('textMessage', '')
+                sender = body.get('senderData', {}).get('sender', '')
+                name = body.get('senderData', {}).get('senderName', 'Гость')
+                phone = sender.replace('@c.us', '')
 
-        print(f'[{datetime.now().strftime("%H:%M")}] {sender_name} ({phone}): {text}')
+                if receipt_id not in processed_ids and text and phone != GUIDE_PHONE:
+                    processed_ids.add(receipt_id)
+                    print(f'[{name}] {text}')
 
-        # Автоответ
-        reply = get_auto_reply(text)
-        if reply and phone != GUIDE_PHONE:
-            send_message(phone, reply)
+                    reply = get_auto_reply(text)
+                    if reply:
+                        time.sleep(1.5)
+                        send_message(phone, reply)
+                        print(f'→ Отправлен автоответ')
 
-        # Уведомить Тимура о новом сообщении
-        notify_guide(sender_name, phone, text)
+                    # Уведомить Тимура
+                    send_message(GUIDE_PHONE, f'📩 *{name}* (+{phone}):\n{text}')
 
-    return jsonify({'ok': True})
+            # Удаляем уведомление из очереди
+            if receipt_id:
+                requests.delete(f'{BASE_URL}/deleteNotification/{TOKEN}/{receipt_id}', timeout=5)
+
+        except Exception as e:
+            print(f'Poll error: {e}')
+            time.sleep(3)
 
 
-def notify_guide(name: str, phone: str, text: str):
-    """Пересылает новое сообщение Тимуру"""
-    msg = f'📩 *Новое сообщение*\n👤 {name} (+{phone})\n💬 {text}'
-    send_message(GUIDE_PHONE, msg)
-
-
-# ── ПОДТВЕРЖДЕНИЕ БРОНИРОВАНИЯ ──
-def send_booking_confirmation(phone: str, name: str, tour: str, date: str, people: int, price: float):
+# Подтверждение бронирования
+def send_booking_confirmation(phone, name, tour, date, people, price):
     msg = f"""✅ *Бронирование подтверждено!*
 
 👤 {name}
-🗺 Тур: {tour}
-📅 Дата: {date}
-👥 Человек: {people}
-💰 Сумма: €{price}
+🗺 {tour}
+📅 {date}
+👥 {people} чел.
+💰 €{price}
 
-📍 Встречаемся у вас в отеле / удобном месте.
-Тимур свяжется с вами за день до тура.
+Тимур свяжется за день до тура.
+Бесплатная отмена за 24 часа."""
+    return send_message(phone, msg)
 
-Бесплатная отмена за 24 часа.
-По вопросам: +995 511 272 623"""
+# Напоминание
+def send_reminder(phone, name, tour, date, meetup):
+    msg = f"""🔔 *Напоминание — тур завтра!*
+
+{name}, ждём вас!
+🗺 {tour}
+📅 {date} · {meetup}
+
+Возьмите: удобную обувь, воду, паспорт (Казбеги), куртку.
+Тимур: +995 511 272 623 🇬🇪"""
     return send_message(phone, msg)
 
 
-# ── НАПОМИНАНИЕ ЗА ДЕНЬ ──
-def send_reminder(phone: str, name: str, tour: str, date: str, meetup: str):
-    msg = f"""🔔 *Напоминание о туре завтра!*
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok', 'bot': 'running'})
 
-Привет, {name}!
-
-🗺 *{tour}*
-📅 Дата: {date}
-🕗 Встреча: {meetup}
-
-Что взять:
-• Удобная обувь
-• Вода и перекус
-• Паспорт (для Казбеги)
-• Тёплая куртка (горы)
-
-Увидимся завтра! 🇬🇪
-Тимур: +995 511 272 623"""
-    return send_message(phone, msg)
+@app.route('/')
+def index():
+    return jsonify({'status': 'Sakhva Travel WhatsApp Bot'})
 
 
-# ── ЗАПУСК ──
 if __name__ == '__main__':
-    print('Sakhva Travel WhatsApp Bot запущен...')
-    print(f'Webhook: POST /webhook')
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Запускаем polling в отдельном потоке
+    t = threading.Thread(target=poll_messages, daemon=True)
+    t.start()
+    print('Bot started!')
+    app.run(host='0.0.0.0', port=5000)
