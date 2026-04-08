@@ -143,8 +143,7 @@ def get_ai_reply(phone: str, user_text: str) -> str:
         return reply
     except Exception as e:
         print(f'AI error: {e}')
-        return ('Привет! Я Тимур — гид по Грузии 🇬🇪 Пишу вам чуть позже, сейчас на туре. '
-                'Или звоните: +995 511 272 623')
+        return None  # при ошибке молчим, не спамим
 
 # ──────────────────────────────────────────────
 # GREEN-API
@@ -160,23 +159,79 @@ def send_message(phone: str, text: str):
     except Exception as e:
         print(f'Send error: {e}')
 
-# ТОЛЬКО эти точные фразы с кнопок сайта активируют бота.
-# Личные сообщения НЕ активируют — только пересылаются Тимуру.
+# Фразы с кнопок сайта — ТОЛЬКО они активируют бота (рус + eng)
 SITE_TRIGGERS = [
+    # русские
     'хочу узнать про туры 2026',
     'хочу забронировать тур 2026',
     'привет тимур, хочу узнать про тур 2026',
     'хочу узнать про тур 2026',
     'привет! хочу узнать про туры 2026',
+    # английские (кнопки сайта)
+    'i want to know about tours',
+    'i want to book a tour',
+    'hello timur',
+    'want to know about tours',
 ]
+
+DIALOG_TIMEOUT = 48 * 3600  # 48 часов без активности → деактивация
 
 def is_site_trigger(text: str) -> bool:
     t = text.lower().strip()
     return any(trigger in t for trigger in SITE_TRIGGERS)
 
 processed_ids = set()
-active_users  = set()   # номера, активировавшие бота через сайт
+# phone → timestamp последнего сообщения (float)
+active_users: dict[str, float] = {}
+# phone → заблокирован Тимуром вручную
+blocked_users: set[str] = set()
+
 stats = {'received': 0, 'replied': 0, 'forwarded': 0, 'started_at': None}
+
+
+def is_active(phone: str) -> bool:
+    if phone in blocked_users:
+        return False
+    last = active_users.get(phone)
+    if last is None:
+        return False
+    return (time.time() - last) < DIALOG_TIMEOUT
+
+
+def activate(phone: str):
+    active_users[phone] = time.time()
+    blocked_users.discard(phone)
+
+
+def handle_guide_command(text: str) -> bool:
+    """Обрабатывает команды от Тимура. Возвращает True если это команда."""
+    t = text.strip()
+    # /off +79261234567 или /off 79261234567
+    if t.startswith('/off'):
+        parts = t.split()
+        if len(parts) >= 2:
+            num = parts[1].lstrip('+')
+            blocked_users.add(num)
+            active_users.pop(num, None)
+            conversations.pop(num, None)
+            send_message(GUIDE_PHONE, f'✅ Бот отключён для +{num}. Ты можешь ответить лично.')
+        return True
+    # /on +79261234567
+    if t.startswith('/on'):
+        parts = t.split()
+        if len(parts) >= 2:
+            num = parts[1].lstrip('+')
+            activate(num)
+            send_message(GUIDE_PHONE, f'✅ Бот включён для +{num}.')
+        return True
+    # /list — список активных диалогов
+    if t == '/list':
+        now = time.time()
+        lines = [f'+{p}: {int((now-ts)//60)} мин назад' for p, ts in active_users.items()]
+        msg = '📋 Активные диалоги:\n' + ('\n'.join(lines) if lines else 'нет')
+        send_message(GUIDE_PHONE, msg)
+        return True
+    return False
 
 def poll_messages():
     stats['started_at'] = datetime.datetime.utcnow().isoformat()
@@ -205,27 +260,34 @@ def poll_messages():
                 name   = body.get('senderData', {}).get('senderName', 'Гость')
                 phone  = sender.replace('@c.us', '')
 
-                if receipt_id not in processed_ids and text and phone != GUIDE_PHONE:
+                if receipt_id not in processed_ids and text:
                     processed_ids.add(receipt_id)
                     stats['received'] += 1
                     print(f'[{name}] {text}')
 
-                    # Только если диалог уже активен или это первое сообщение с сайта
-                    active = phone in active_users
+                    # Команды от Тимура
+                    if phone == GUIDE_PHONE:
+                        handle_guide_command(text)
+                        continue
+
                     trigger = is_site_trigger(text)
+                    already_active = is_active(phone)
 
-                    if active or trigger:
-                        if trigger and not active:
-                            active_users.add(phone)
-                        # AI-ответ
+                    if trigger:
+                        activate(phone)
+
+                    if trigger or already_active:
+                        activate(phone)  # обновляем timestamp
                         reply = get_ai_reply(phone, text)
-                        time.sleep(1.5)
-                        send_message(phone, reply)
-                        stats['replied'] += 1
-                        print(f'→ AI ответил: {reply[:60]}...')
+                        if reply:
+                            time.sleep(1.5)
+                            send_message(phone, reply)
+                            stats['replied'] += 1
+                            print(f'→ AI: {reply[:60]}...')
 
-                    # Тимуру — всегда
-                    send_message(GUIDE_PHONE, f'📩 *{name}* (+{phone}):\n{text}')
+                    # Тимуру — всегда (личные тоже, но помечаем)
+                    tag = '' if (trigger or already_active) else '👤 '
+                    send_message(GUIDE_PHONE, f'{tag}📩 *{name}* (+{phone}):\n{text}')
                     stats['forwarded'] += 1
 
         except Exception as e:
@@ -265,7 +327,7 @@ def send_reminder(phone, name, tour, date, meetup):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v6-AI',
+        'version': 'v8',
         'polling': stats['started_at'] is not None,
         'started_at': stats['started_at'],
         'received': stats['received'],
