@@ -86,7 +86,7 @@ def poll_messages():
     print('Polling started...')
     while True:
         try:
-            r = requests.get(f'{BASE_URL}/receiveNotification/{TOKEN}', timeout=15)
+            r = requests.get(f'{BASE_URL}/receiveNotification/{TOKEN}', timeout=25)
             data = r.json()
             if not data:
                 time.sleep(1)
