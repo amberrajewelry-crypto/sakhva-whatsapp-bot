@@ -74,6 +74,7 @@ KEYWORDS = {
 }
 
 processed_ids = set()
+stats = {'received': 0, 'replied': 0, 'forwarded': 0, 'started_at': None}
 
 def get_auto_reply(text: str):
     t = text.lower()
@@ -83,6 +84,8 @@ def get_auto_reply(text: str):
     return None
 
 def poll_messages():
+    import datetime
+    stats['started_at'] = datetime.datetime.utcnow().isoformat()
     print('Polling started...')
     while True:
         try:
@@ -105,16 +108,19 @@ def poll_messages():
 
                 if receipt_id not in processed_ids and text and phone != GUIDE_PHONE:
                     processed_ids.add(receipt_id)
+                    stats['received'] += 1
                     print(f'[{name}] {text}')
 
                     reply = get_auto_reply(text)
                     if reply:
                         time.sleep(1.5)
                         send_message(phone, reply)
+                        stats['replied'] += 1
                         print(f'→ Отправлен автоответ')
 
                     # Уведомить Тимура
                     send_message(GUIDE_PHONE, f'📩 *{name}* (+{phone}):\n{text}')
+                    stats['forwarded'] += 1
 
             # Удаляем уведомление из очереди
             if receipt_id:
@@ -154,7 +160,16 @@ def send_reminder(phone, name, tour, date, meetup):
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'bot': 'running'})
+    return jsonify({
+        'status': 'ok',
+        'bot': 'running',
+        'polling': stats['started_at'] is not None,
+        'started_at': stats['started_at'],
+        'received': stats['received'],
+        'replied': stats['replied'],
+        'forwarded': stats['forwarded'],
+        'version': 'v4-polling'
+    })
 
 @app.route('/')
 def index():
